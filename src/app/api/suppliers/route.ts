@@ -1,0 +1,5 @@
+import { getCurrentOrg, runScoped } from "@/src/lib/tenancy";
+import { assertSubscriptionActive } from "@/src/lib/subscription";
+import { apiError } from "@/src/lib/http";
+export async function GET() { try { const { organization_id } = await getCurrentOrg(); await assertSubscriptionActive(organization_id); const s = await runScoped(c => c.query(`SELECT id, name, contact_name, contact_email, created_at FROM suppliers ORDER BY name`).then(r => r.rows)); return Response.json(s); } catch (e) { return apiError(e); } }
+export async function POST(req: Request) { try { const { organization_id } = await getCurrentOrg(); await assertSubscriptionActive(organization_id); const { name, contact_name, contact_email } = await req.json(); if (!name?.trim()) return Response.json({ error: "Name required" }, { status: 400 }); const s = await runScoped(c => c.query(`INSERT INTO suppliers (organization_id, name, contact_name, contact_email) VALUES ($1, $2, $3, $4) RETURNING *`, [organization_id, name.trim(), contact_name || null, contact_email || null]).then(r => r.rows[0])); return Response.json(s, { status: 201 }); } catch (e) { return apiError(e); } }

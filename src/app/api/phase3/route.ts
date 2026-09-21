@@ -1,0 +1,25 @@
+// Phase 3: supplier-audits, risk-scores, supplier-tiers, onboarding-requests
+import { getCurrentOrg, withOrgContext } from "@/src/lib/tenancy";
+import { assertSubscriptionActive, requireFullSuite, getOrgSubscription, type OrgRow } from "@/src/lib/subscription";
+import { computeRiskScore } from "@/src/lib/extras";
+import { apiError } from "@/src/lib/http";
+async function guard(): Promise<{ organization_id: string; org: OrgRow }> { const { organization_id } = await getCurrentOrg(); const org = await assertSubscriptionActive(organization_id); requireFullSuite(org); return { organization_id, org }; }
+export async function GET(req: Request) {
+  try { const { organization_id } = await guard(); const m = new URL(req.url).searchParams.get("module");
+    if (m === "audits") return Response.json(await withOrgContext(organization_id, c => c.query(`select a.*, s.name as supplier_name from supplier_audits a join suppliers s on s.id = a.supplier_id order by a.created_at desc`).then(r => r.rows)));
+    if (m === "risk-scores") return Response.json(await withOrgContext(organization_id, c => c.query(`select r.*, s.name as supplier_name from supplier_risk_scores r join suppliers s on s.id = r.supplier_id order by r.score asc`).then(r => r.rows)));
+    if (m === "tiers") return Response.json(await withOrgContext(organization_id, c => c.query(`select t.*, p.name as parent_name, c.name as child_name from supplier_tiers t join suppliers p on p.id = t.parent_supplier_id join suppliers c on c.id = t.child_supplier_id order by p.name`).then(r => r.rows)));
+    if (m === "onboarding") return Response.json(await withOrgContext(organization_id, c => c.query(`select * from onboarding_requests order by created_at desc`).then(r => r.rows)));
+    return Response.json({ error: "module required: audits, risk-scores, tiers, onboarding" }, { status: 400 });
+  } catch (e) { return apiError(e); }
+}
+export async function POST(req: Request) {
+  try { const { organization_id } = await guard(); const m = new URL(req.url).searchParams.get("module"); const b = await req.json();
+    if (m === "audits") { if (!b.supplier_id) return Response.json({ error: "supplier_id required" }, { status: 400 }); return Response.json(await withOrgContext(organization_id, c => c.query(`insert into supplier_audits (organization_id, supplier_id, audit_type, scheduled_date, outcome, notes) values ($1, $2, $3, $4, $5, $6) returning *`, [organization_id, b.supplier_id, b.audit_type || "supplier", b.scheduled_date || null, b.outcome || "pending", b.notes || null]).then(r => r.rows[0])), { status: 201 }); }
+    if (m === "risk-scores") { const result = await withOrgContext(organization_id, async (client) => { const { rows: suppliers } = await client.query(`select id from suppliers`); const out = []; for (const s of suppliers) { const { rows: certs } = await client.query(`select status from certificates where supplier_id = $1`, [s.id]); const { rows: audits } = await client.query(`select outcome from supplier_audits where supplier_id = $1`, [s.id]); const { score, band, factors } = computeRiskScore({ certificates: certs, audits }); const { rows } = await client.query(`insert into supplier_risk_scores (organization_id, supplier_id, score, band, factors, computed_at) values ($1, $2, $3, $4, $5, now()) on conflict (organization_id, supplier_id) do update set score = excluded.score, band = excluded.band, factors = excluded.factors, computed_at = now() returning *`, [organization_id, s.id, score, band, JSON.stringify(factors)]); out.push(rows[0]); } return out; }); return Response.json({ computed: result.length, scores: result }); }
+    if (m === "tiers") { if (!b.parent_supplier_id || !b.child_supplier_id) return Response.json({ error: "parent and child required" }, { status: 400 }); return Response.json(await withOrgContext(organization_id, c => c.query(`insert into supplier_tiers (organization_id, parent_supplier_id, child_supplier_id, relationship, material_name, origin_country) values ($1, $2, $3, $4, $5, $6) returning *`, [organization_id, b.parent_supplier_id, b.child_supplier_id, b.relationship || "sub_supplier", b.material_name || null, b.origin_country || null]).then(r => r.rows[0])), { status: 201 }); }
+    if (m === "onboarding") { if (!b.supplier_name) return Response.json({ error: "supplier_name required" }, { status: 400 }); return Response.json(await withOrgContext(organization_id, c => c.query(`insert into onboarding_requests (organization_id, supplier_id, supplier_name, contact_email, status, form_payload) values ($1, $2, $3, $4, $5, $6) returning *`, [organization_id, b.supplier_id || null, b.supplier_name, b.contact_email || null, b.status || "draft", b.form_payload || {}]).then(r => r.rows[0])), { status: 201 }); }
+    return Response.json({ error: "module required" }, { status: 400 });
+  } catch (e) { return apiError(e); }
+}
+export async function OPTIONS() { try { const { organization_id } = await getCurrentOrg(); const org = await getOrgSubscription(organization_id); return Response.json({ plan: org?.subscription_plan, module: "phase3" }); } catch (e) { return apiError(e); } }
